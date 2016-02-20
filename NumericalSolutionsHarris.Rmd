@@ -1,0 +1,363 @@
+---
+title: "Numerical Solutions to Harris’ Equations"
+author: "Timothy Daley"
+date: "December 8, 2015"
+output: html_document
+---
+
+In this little write-up I'm going to be discussing the performance of methods to solve Harris' system of equations (equation 6 of [Harris (1959)](http://www.jstor.org/stable/2237096])).  This system of equations also arises in the context of Gaussian Quadrature and has been extensively studied in this context.  Gautschi ([1983](https://www.cs.purdue.edu/homes/wxg/selected_works/section_08/084.pdf)) showed an example of two sets of Gaussian Quadrature rules that both solve the system of equations to numerical precision but differ substantially.  This is due to the ill-conditioning of the map from the moments to the quadrature rules.  I seek to compare numerical solutions of the system of equations by directly solving the system of equations, e.g via Newton-Raphson, or by computing the three term recurrence via the moments and then computing the quadrature rules.
+
+## Harris' system of equations
+
+
+\begin{align}
+w_{1} + \ldots + w_{p} &= 1 \notag \\
+w_{1} x_{1} + \ldots + w_{p} x_{p} &= \nu_{1} \notag \\
+&\vdots \notag \\
+w_{1} x_{1}^{2p - 1} + \ldots w_{p} x_{p}^{2p - 1} &= \nu_{2p - 1} \label{Harris}
+\end{align}
+
+We require that all $x_{1}, \ldots, x_{p}$ and $w_{1}, \ldots, w_{p}$  be positive.
+
+## Known case
+
+We will consider a case where we can compute the Gaussian quadrature rules without the effect of ill-conditioning, specifically the Negative Binomial distribution.  In this case the three term recurrence can be analytically calculated and the Gaussian Quadrature rules can be numerically calculated without the ill-conditioning problem.  We will use a population of one million species with counts that are Negative Binomial$(\mu = 1, r = 1)$ to do the comparisions.
+
+
+```{r cache=TRUE}
+gamma_poiss_1Msample_true_moments = 
+  factorial(1:14)*1000000*dnbinom(1:14, size = 1.0, mu = 1.0)/
+  (1000000*dnbinom(1, size = 1.0, mu = 1.0))
+gamma_poiss_1Msample = rnbinom(1000000, mu = 1.0, size = 1.0)
+gamma_poiss_1Msample = gamma_poiss_1Msample[which(gamma_poiss_1Msample > 0)]
+gamma_poiss_1Msample_hist = hist(gamma_poiss_1Msample, breaks = 0:max(gamma_poiss_1Msample), 
+                                 plot = FALSE) 
+gamma_poiss_1Msample_hist = 
+  cbind(gamma_poiss_1Msample_hist$breaks[2:length(gamma_poiss_1Msample_hist$breaks)],
+        gamma_poiss_1Msample_hist$counts)
+gamma_poiss_1Msample_moments =
+  factorial(1:14)*gamma_poiss_1Msample_hist[1:14,2]/gamma_poiss_1Msample_hist[1,2]
+gamma_poiss_1Msample_true_vs_observed_moments = 
+  cbind(format(gamma_poiss_1Msample_true_moments, scientific = TRUE), 
+        format(gamma_poiss_1Msample_moments, scientific = TRUE))
+colnames(gamma_poiss_1Msample_true_vs_observed_moments) = c("true", "observed")
+print(gamma_poiss_1Msample_true_vs_observed_moments, digits = 10, 
+      scipen = 10, quote = FALSE)
+```
+
+The moments are relatively close until the larger moments.
+
+```{r cache=TRUE}
+rel_error = (gamma_poiss_1Msample_moments - gamma_poiss_1Msample_true_moments)/
+  sqrt(gamma_poiss_1Msample_true_moments)
+plot(x = 1:(length(rel_error) - 1), y = log10(abs(rel_error[2:length(rel_error)])), pch = 16)
+```
+
+## Numerically solving Harris system of equations
+
+We will now consider numerically solving the system of equations.  The R package BB ([Varadhan & Gilbert (2009)](https://cran.r-project.org/web/packages/BB/vignettes/BBvignetteJSS.pdf)) provides methods to solve large systems of non-linear equations based on the Barzilai-Borwein gradient method.  I transformed the problem, defining the variables log_w and log_x to be the logarithms of the weights and points, respectively.  This is to ensure that the points and weights are positive.
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+install.packages('BB', repos = 'http://cran.r-project.org')
+library(BB)
+```
+
+```{r cache=TRUE,message=FALSE}
+harris_eqns <- function(y) {
+  # y is in two parts:  weights and points
+  stopifnot((length(y) %% 2 == 0))
+  p = length(y)/2
+  print(p)
+  log_w = y[1:p]
+  log_x = y[(p+1):length(y)]
+  F = rep(0, times = length(y))
+  for(i in 1:length(y)){
+    F[i] = F[i] + sum(exp(log_w + (i - 1)*log_x)) - estim_moments[i]
+  }
+  return(F)
+}
+
+p = 3
+w0 = runif(p, min = 0, max = 1)
+w0 = w0/sum(w0)
+x0 = sort(runif(p, min = 0, max = 5))
+initial_guess = c(log(w0), log(x0))
+estim_moments = gamma_poiss_1Msample_true_moments[1:(2*p)]
+harris_eqns(initial_guess)
+```
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+harris_bbsolve = BBsolve(par = initial_guess, fn = harris_eqns, quiet = TRUE)
+```
+
+```{r cache=TRUE}
+harris_bbsolve
+exp(harris_bbsolve$par)
+````
+
+Since that failed, let's try something else.  The package nleqslv has methods to solve a system of non-linear equations using aBroyden method.
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+install.packages('nleqslv', repos = 'http://cran.r-project.org')
+library(nleqslv)
+```
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+harris_nleqslv = nleqslv(x = initial_guess, fn = harris_eqns)
+```
+
+```{r cache=TRUE}
+harris_nleqslv
+exp(harris_nleqslv$x)
+estim_points = rev(exp(harris_nleqslv$x[(p + 1):(2*p)]))
+estim_weights = rev(exp(harris_nleqslv$x[1:p]))
+```
+
+```{r cache=TRUE}
+true_jacobi = mat.or.vec(p, p)
+for(i in 1:p){
+  true_jacobi[i,i] = (2*(i - 1) + 1 + 1)/2
+}
+for(i in 1:(p - 1)){
+  true_jacobi[i, i + 1] = sqrt((i + 1)*i/(2^2))
+  true_jacobi[i + 1, i] = sqrt((i + 1)*i/(2^2))
+}
+true_jacobi.eigen = eigen(true_jacobi)
+true_points = true_jacobi.eigen$values
+true_weights = true_jacobi.eigen$vectors[1,]^2
+true_quad_libsize = 1000000*(1 - dnbinom(0, size = 1, mu = 1)) + 
+  (1000000*dnbinom(1, size = 1, mu = 1))*sum(true_weights/true_points)
+true_points
+estim_points
+true_weights
+estim_weights
+```
+
+Looks like this is working.  Now let's examine it with sampled data.
+
+## Testing on sampled data
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+estim_moments = gamma_poiss_1Msample_moments[1:(2*p)]
+w0 = runif(p, min = 0, max = 1)
+w0 = w0/sum(w0)
+x0 = sort(runif(p, min = 0, max = 5))
+initial_guess = c(log(w0), log(x0))
+harris_nleqslv = nleqslv(x = initial_guess, fn = harris_eqns, control = list(maxit=1000))
+```
+
+```{r cache=TRUE}
+harris_nleqslv
+estim_points = rev(exp(harris_nleqslv$x[(p + 1):(2*p)]))
+estim_weights = rev(exp(harris_nleqslv$x[1:p]))
+estim_libsize = sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points)
+estim_libsize
+true_quad_libsize
+```
+
+```{r cache=TRUE}
+write.table(gamma_poiss_1Msample_hist, 
+            file = "gamma_poiss_1Msample_hist.txt", sep = '\t', quote = FALSE, 
+            col.names = FALSE, row.names = FALSE)
+system("~/preseq/preseq bound_pop -p 3 -Q -H gamma_poiss_1Msample_hist.txt -o gamma_poiss_1Msample_3point_quad_estim.txt &> gamma_poiss_1Msample_3point_quad_estim_out.txt")
+gamma_poiss_1Msample_3point_quad_estim = 
+  read.table(file = "gamma_poiss_1Msample_3point_quad_estim.txt", header=T)
+gamma_poiss_1Msample_3point_quad_estim
+```
+
+The results look identical.  Now let's do this 1000 times to look at the success rates and differences in the estimates.
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+quad_success = 0
+nleqslv_success = 0
+quad_estim_libsize = c()
+nleqslv_estim_libsize = c()
+estim_diff = c()
+n_iter = 1000
+for(i in 1:n_iter){
+  gamma_poiss_1Msample = rnbinom(1000000, mu = 1.0, size = 1.0)
+  gamma_poiss_1Msample = gamma_poiss_1Msample[which(gamma_poiss_1Msample > 0)]
+  gamma_poiss_1Msample_hist = hist(gamma_poiss_1Msample, breaks = 0:max(gamma_poiss_1Msample), plot = FALSE) 
+  gamma_poiss_1Msample_hist = cbind(gamma_poiss_1Msample_hist$breaks[2:length(gamma_poiss_1Msample_hist$breaks)], 
+                                    gamma_poiss_1Msample_hist$counts)
+  gamma_poiss_1Msample_moments = factorial(1:14)*gamma_poiss_1Msample_hist[1:14,2]/
+    gamma_poiss_1Msample_hist[1,2]
+
+  # non-linear solver
+  estim_moments = gamma_poiss_1Msample_moments[1:(2*p)]
+  w0 = runif(p, min = 0, max = 1)
+  w0 = w0/sum(w0)
+  x0 = sort(runif(p, min = 0, max = 5))
+  initial_guess = c(log(w0), log(x0))
+  harris_nleqslv = nleqslv(x = initial_guess, fn = harris_eqns, control = list(maxit=1000))
+  if(harris_nleqslv$termcd == 1){
+    nleqslv_success = nleqslv_success + 1
+    estim_points = rev(exp(harris_nleqslv$x[(p + 1):(2*p)]))
+    estim_weights = rev(exp(harris_nleqslv$x[1:p]))
+    nleqslv_estim_libsize = c(nleqslv_estim_libsize, sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points) )
+  }
+  
+  # quadrature
+  write.table(gamma_poiss_1Msample_hist, file = "gamma_poiss_1Msample_hist.txt", 
+              sep = '\t', quote = FALSE, col.names = FALSE, row.names = FALSE)
+  system("~/preseq/preseq bound_pop -p 3 -Q -H gamma_poiss_1Msample_hist.txt -o gamma_poiss_1Msample_3point_quad_estim.txt &> gamma_poiss_1Msample_3point_quad_estim_out.txt")
+  gamma_poiss_1Msample_3point_quad_estim = read.table(file = "gamma_poiss_1Msample_3point_quad_estim.txt", header=T)
+  if(gamma_poiss_1Msample_3point_quad_estim$n_points == 3){
+    quad_success = quad_success + 1
+    quad_estim_libsize = c(quad_estim_libsize, gamma_poiss_1Msample_3point_quad_estim$quadrature_estimated_unobs)
+  }
+  
+  # difference, need both to return success
+  if((gamma_poiss_1Msample_3point_quad_estim$n_points == 3) && (harris_nleqslv$termcd == 1)){
+    estim_diff = c(estim_diff, gamma_poiss_1Msample_3point_quad_estim$quadrature_estimated_unobs - (sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points)) )  
+  }
+}
+```
+
+```{r cache=TRUE}
+quad_success = quad_success/n_iter
+quad_success
+nleqslv_success = nleqslv_success/n_iter
+nleqslv_success
+mean(estim_diff)
+range(estim_diff)
+boxplot(quad_estim_libsize, nleqslv_estim_libsize, ylim = c(500000, 1500000))
+abline(h = 1000000, lty = 2, lwd = 2)
+
+boxplot(estim_diff)
+```
+
+The differences look minimal but the success rates look different.
+
+### 4 point estimates
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+quad_success = 0
+nleqslv_success = 0
+quad_estim_libsize = c()
+nleqslv_estim_libsize = c()
+estim_diff = c()
+n_iter = 1000
+p = 4
+for(i in 1:n_iter){
+  gamma_poiss_1Msample = rnbinom(1000000, mu = 1.0, size = 1.0)
+  gamma_poiss_1Msample = gamma_poiss_1Msample[which(gamma_poiss_1Msample > 0)]
+  gamma_poiss_1Msample_hist = hist(gamma_poiss_1Msample, breaks = 0:max(gamma_poiss_1Msample), plot = FALSE) 
+  gamma_poiss_1Msample_hist = cbind(gamma_poiss_1Msample_hist$breaks[2:length(gamma_poiss_1Msample_hist$breaks)], gamma_poiss_1Msample_hist$counts)
+  gamma_poiss_1Msample_moments = factorial(1:14)*gamma_poiss_1Msample_hist[1:14,2]/gamma_poiss_1Msample_hist[1,2]
+
+  # non-linear solver
+  estim_moments = gamma_poiss_1Msample_moments[1:(2*p)]
+  w0 = runif(p, min = 0, max = 1)
+  w0 = w0/sum(w0)
+  x0 = sort(runif(p, min = 0, max = 5))
+  initial_guess = c(log(w0), log(x0))
+  harris_nleqslv = nleqslv(x = initial_guess, fn = harris_eqns, control = list(maxit=1000))
+  if(harris_nleqslv$termcd == 1){
+    nleqslv_success = nleqslv_success + 1
+    estim_points = rev(exp(harris_nleqslv$x[(p + 1):(2*p)]))
+    estim_weights = rev(exp(harris_nleqslv$x[1:p]))
+    nleqslv_estim_libsize = c(nleqslv_estim_libsize, sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points) )
+  }
+  
+  # quadrature
+  write.table(gamma_poiss_1Msample_hist, file = "gamma_poiss_1Msample_hist.txt", sep = '\t', quote = FALSE, col.names = FALSE, row.names = FALSE)
+  system("~/preseq/preseq bound_pop -p 4 -Q -H gamma_poiss_1Msample_hist.txt -o gamma_poiss_1Msample_4point_quad_estim.txt &> gamma_poiss_1Msample_4point_quad_estim_out.txt")
+  gamma_poiss_1Msample_4point_quad_estim = read.table(file = "gamma_poiss_1Msample_4point_quad_estim.txt", header=T)
+  if(gamma_poiss_1Msample_4point_quad_estim$n_points == 4){
+    quad_success = quad_success + 1
+    quad_estim_libsize = c(quad_estim_libsize, gamma_poiss_1Msample_4point_quad_estim$quadrature_estimated_unobs)
+  }
+  
+  # difference, need both to return success
+  if((gamma_poiss_1Msample_4point_quad_estim$n_points == 4) && (harris_nleqslv$termcd == 1)){
+    estim_diff = c(estim_diff, gamma_poiss_1Msample_4point_quad_estim$quadrature_estimated_unobs - (sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points)) )  
+  }
+}
+```
+
+```{r cache=TRUE}
+quad_success = quad_success/n_iter
+quad_success
+nleqslv_success = nleqslv_success/n_iter
+nleqslv_success
+mean(estim_diff)
+range(estim_diff)
+boxplot(quad_estim_libsize, nleqslv_estim_libsize, ylim = c(500000, 1500000))
+abline(h = 1000000, lty = 2, lwd = 2)
+
+boxplot(estim_diff)
+```
+
+Again, the methods have almost identical estimates but different success rates.
+
+### size = 0.1
+
+```{r cache=TRUE,message=FALSE,results='hide'}
+quad_success = 0
+nleqslv_success = 0
+quad_estim_libsize = c()
+nleqslv_estim_libsize = c()
+estim_diff = c()
+n_iter = 1000
+p = 4
+for(i in 1:n_iter){
+  gamma_poiss_1Msample = rnbinom(1000000, mu = 1.0, size = 0.1)
+  gamma_poiss_1Msample = gamma_poiss_1Msample[which(gamma_poiss_1Msample > 0)]
+  gamma_poiss_1Msample_hist = hist(gamma_poiss_1Msample, breaks = 0:max(gamma_poiss_1Msample), plot = FALSE) 
+  gamma_poiss_1Msample_hist = cbind(gamma_poiss_1Msample_hist$breaks[2:length(gamma_poiss_1Msample_hist$breaks)], gamma_poiss_1Msample_hist$counts)
+  gamma_poiss_1Msample_moments = factorial(1:14)*gamma_poiss_1Msample_hist[1:14,2]/gamma_poiss_1Msample_hist[1,2]
+
+  # non-linear solver
+  estim_moments = gamma_poiss_1Msample_moments[1:(2*p)]
+  w0 = runif(p, min = 0, max = 1)
+  w0 = w0/sum(w0)
+  x0 = sort(runif(p, min = 0, max = 5))
+  initial_guess = c(log(w0), log(x0))
+  harris_nleqslv = nleqslv(x = initial_guess, fn = harris_eqns, control = list(maxit=1000))
+  if(harris_nleqslv$termcd == 1){
+    nleqslv_success = nleqslv_success + 1
+    estim_points = rev(exp(harris_nleqslv$x[(p + 1):(2*p)]))
+    estim_weights = rev(exp(harris_nleqslv$x[1:p]))
+    nleqslv_estim_libsize = c(nleqslv_estim_libsize, sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points) )
+  }
+  
+  # quadrature
+  write.table(gamma_poiss_1Msample_hist, file = "gamma_poiss_1Msample_hist.txt", sep = '\t', quote = FALSE, col.names = FALSE, row.names = FALSE)
+  system("~/preseq/preseq bound_pop -p 4 -Q -H gamma_poiss_1Msample_hist.txt -o gamma_poiss_1Msample_4point_quad_estim.txt &> gamma_poiss_1Msample_4point_quad_estim_out.txt")
+  gamma_poiss_1Msample_4point_quad_estim = read.table(file = "gamma_poiss_1Msample_4point_quad_estim.txt", header=T)
+  if(gamma_poiss_1Msample_4point_quad_estim$n_points == 4){
+    quad_success = quad_success + 1
+    quad_estim_libsize = c(quad_estim_libsize, gamma_poiss_1Msample_4point_quad_estim$quadrature_estimated_unobs)
+  }
+  
+  # difference, need both to return success
+  if((gamma_poiss_1Msample_4point_quad_estim$n_points == 4) && (harris_nleqslv$termcd == 1)){
+    estim_diff = c(estim_diff, gamma_poiss_1Msample_4point_quad_estim$quadrature_estimated_unobs - (sum(gamma_poiss_1Msample_hist[,2]) + gamma_poiss_1Msample_hist[1,2]*sum(estim_weights/estim_points)) )  
+  }
+}
+```
+
+```{r cache=TRUE}
+quad_success = quad_success/n_iter
+quad_success
+nleqslv_success = nleqslv_success/n_iter
+nleqslv_success
+mean(estim_diff)
+range(estim_diff)
+length(estim_diff)
+boxplot(quad_estim_libsize, nleqslv_estim_libsize, ylim = c(0, 1000000))
+abline(h = 1000000, lty = 2, lwd = 2)
+
+boxplot(estim_diff)
+```
+
+
+In summary, there looks to be little differences between the estimates from direct solving of the Harris' equations and estimates from the orthogonal polynomial three term recurrence when they both converge.   The major difference is that the orthogonal polynomial route gives estimates in more cases than by direct solving, sometimes over 3 times more.
+
+```{r}
+pdf('negbin_nleqslv_vs_quad_mu1_size0.1.pdf')
+boxplot(quad_estim_libsize, nleqslv_estim_libsize, ylim = c(0, 1000000))
+abline(h = 1000000, lty = 2, lwd = 2)
+dev.off()
+```
